@@ -52,6 +52,7 @@ type Organization = {
 const STORAGE_KEY = "career-intelligence-v1";
 
 const today = () => new Date().toISOString().slice(0, 10);
+const addDays = (days: number) => { const d = new Date(); d.setDate(d.getDate() + days); return d.toISOString().slice(0,10); };
 const uid = () => Math.random().toString(36).slice(2) + Date.now().toString(36);
 
 const seed: Opportunity[] = [
@@ -250,6 +251,7 @@ export default function Home() {
 
   const metrics = useMemo(() => {
     const active = opps.filter(o => !["Pass","Closed","Archived"].includes(o.status));
+    const followUps = opps.filter(o => o.followUpDate && !["Closed","Archived","Pass"].includes(o.status) && o.followUpDate <= today()).length;
     const avg = opps.length ? Math.round(opps.reduce((s,o)=>s+Number(o.jimScore || 0),0)/opps.length) : 0;
     return {
       total: opps.length,
@@ -260,6 +262,7 @@ export default function Home() {
       dream: opps.filter(o => o.rating === "Dream").length,
       good: opps.filter(o => o.rating === "Good").length,
       bad: opps.filter(o => o.rating === "Bad").length,
+      followUps,
       avg,
       active: active.length,
     };
@@ -360,8 +363,8 @@ export default function Home() {
     <main className="app">
       <div className="topbar">
         <div>
-          <h1>Career Intelligence Dashboard</h1>
-          <p>Mission-driven opportunity tracking, scoring, and application management</p>
+          <h1>Career Opp Dashboard</h1>
+          <p>Career intelligence, opportunity scoring, and application tracking</p>
         </div>
         <div style={{display:"flex", gap:8, flexWrap:"wrap"}}>
           <button className="btn" onClick={() => download(`career-opportunities-${today()}.csv`, toCSV(opps), "text/csv")}><Download size={16}/> Export CSV</button>
@@ -378,11 +381,12 @@ export default function Home() {
           <div className="card metric"><div className="label">Apply</div><div className="value">{metrics.apply}</div></div>
           <div className="card metric"><div className="label">Applied</div><div className="value">{metrics.applied}</div></div>
           <div className="card metric"><div className="label">Dream / Good</div><div className="value">{metrics.dream + metrics.good}</div></div>
+          <div className="card metric"><div className="label">Follow-ups Due</div><div className="value">{metrics.followUps}</div></div>
         </div>
 
         <div className="tabs">
           {[
-            ["opps","Opportunities"], ["archive","Archive"], ["orgs","Organizations"], ["apps","Applications"], ["interviews","Interviews"], ["resumes","Resume Library"]
+            ["opps","Active Opportunities"], ["archive","Archive"], ["orgs","Organizations"], ["apps","Applications"], ["interviews","Interviews"], ["resumes","Resume Library"]
           ].map(([k,v]) => <button key={k} className={`tab ${tab===k ? "active" : ""}`} onClick={()=>setTab(k as any)}>{v}</button>)}
         </div>
 
@@ -426,8 +430,11 @@ export default function Home() {
                         <button className="btn dream" onClick={()=>quickUpdate(selected.id, { rating: "Dream", status: "Apply" })}><Star size={16}/> Dream</button>
                         <button className="btn neutral" onClick={()=>quickUpdate(selected.id, { rating: "Neutral" })}>Neutral</button>
                         <button className="btn bad" onClick={()=>quickUpdate(selected.id, { rating: "Bad", status: "Pass" })}><ThumbsDown size={16}/> Bad</button>
-                        <button className="btn" onClick={()=>quickUpdate(selected.id, { status: "Applied", appliedDate: selected.appliedDate || today() })}>Mark Applied</button>
+                        <button className="btn" onClick={()=>quickUpdate(selected.id, { status: "Watch" })}>Watch</button>
+                        <button className="btn" onClick={()=>quickUpdate(selected.id, { status: "Applied", appliedDate: selected.appliedDate || today(), followUpDate: selected.followUpDate || addDays(7) })}>Mark Applied</button>
                         <button className="btn" onClick={()=>quickUpdate(selected.id, { status: "Interview" })}>Interview</button>
+                        <button className="btn" onClick={()=>quickUpdate(selected.id, { status: "Pass", rating: selected.rating === "Unrated" ? "Bad" : selected.rating })}>Pass</button>
+                        <button className="btn" onClick={()=>quickUpdate(selected.id, { status: "Closed" })}>Close</button>
                         <button className="btn" onClick={()=>{ quickUpdate(selected.id, { status: "Archived" }); setSelectedId(""); }}><Archive size={16}/> Archive</button>
                         {selected.link && <a className="btn" href={selected.link} target="_blank">Open Listing</a>}
                         <button className="btn" onClick={()=>setEditing(selected)}>Edit</button>
@@ -458,7 +465,7 @@ export default function Home() {
           </>
         )}
 
-        {tab === "archive" && <SimpleTable title="Archived Opportunities" rows={opps.filter(o=>o.status === "Archived")} />}
+        {tab === "archive" && <ArchiveTable rows={opps.filter(o=>o.status === "Archived")} onUnarchive={(id)=>quickUpdate(id,{status:"Review"})} onDelete={deleteOpportunity} />}
         {tab === "orgs" && <Organizations orgs={orgs} />}
         {tab === "apps" && <SimpleTable title="Applications" rows={opps.filter(o=>["Apply","Applied","Interview","Offer"].includes(o.status))} />}
         {tab === "interviews" && <SimpleTable title="Interview Pipeline" rows={opps.filter(o=>["Interview","Offer"].includes(o.status))} />}
@@ -477,6 +484,11 @@ function Score({ label, value }: { label: string; value: number }) {
 
 function Organizations({ orgs }: { orgs: Organization[] }) {
   return <div className="card detail"><h2>Organization Watch List</h2><table className="table"><thead><tr><th>Priority</th><th>Organization</th><th>Category</th><th>Mission</th><th>Notes</th></tr></thead><tbody>{orgs.map(o=><tr key={o.name}><td>{o.watchPriority}</td><td>{o.name}</td><td>{o.category}</td><td>{o.mission}</td><td>{o.notes}</td></tr>)}</tbody></table></div>;
+}
+
+
+function ArchiveTable({ rows, onUnarchive, onDelete }: { rows: Opportunity[]; onUnarchive: (id: string)=>void; onDelete: (id: string)=>void }) {
+  return <div className="card detail"><h2>Archive</h2><p className="small">Archived opportunities are preserved here but removed from the active opportunity queue.</p><table className="table"><thead><tr><th>Score</th><th>Rating</th><th>Organization</th><th>Role</th><th>Salary</th><th>Notes</th><th>Actions</th></tr></thead><tbody>{rows.map(o=><tr key={o.id}><td>{o.jimScore}</td><td>{o.rating}</td><td>{o.organization}</td><td>{o.position}</td><td>{o.salary}</td><td>{o.notes}</td><td><button className="btn" onClick={()=>onUnarchive(o.id)}>Unarchive</button> <button className="btn danger" onClick={()=>onDelete(o.id)}>Delete</button></td></tr>)}</tbody></table>{!rows.length && <div className="empty">No archived opportunities yet.</div>}</div>;
 }
 
 function SimpleTable({ title, rows }: { title: string; rows: Opportunity[] }) {
