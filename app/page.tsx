@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { Archive, Download, FileJson, Plus, Search, Star, ThumbsDown, ThumbsUp, Trash2, Upload } from "lucide-react";
+import { supabase } from "../lib/supabase";
 
 type Tier = "1" | "2" | "3";
 type Status = "Review" | "Apply" | "Applied" | "Interview" | "Offer" | "Pass" | "Watch" | "Closed" | "Archived";
@@ -49,11 +50,9 @@ type Organization = {
   notes: string;
 };
 
-const STORAGE_KEY = "career-intelligence-v1";
-
 const today = () => new Date().toISOString().slice(0, 10);
 const addDays = (days: number) => { const d = new Date(); d.setDate(d.getDate() + days); return d.toISOString().slice(0,10); };
-const uid = () => Math.random().toString(36).slice(2) + Date.now().toString(36);
+const uid = () => (typeof crypto !== "undefined" && "randomUUID" in crypto ? crypto.randomUUID() : Math.random().toString(36).slice(2) + Date.now().toString(36));
 
 const seed: Opportunity[] = [
   {
@@ -189,6 +188,123 @@ function normalizeKey(o: Partial<Opportunity>) {
   return `${(o.organization || "").trim().toLowerCase()}|${(o.position || "").trim().toLowerCase()}`;
 }
 
+
+type DbOpportunity = {
+  id?: string;
+  first_seen?: string | null;
+  last_reviewed?: string | null;
+  tier?: number | null;
+  status?: string | null;
+  rating?: string | null;
+  applied_date?: string | null;
+  follow_up_date?: string | null;
+  jim_score?: number | null;
+  mission_score?: number | null;
+  role_fit_score?: number | null;
+  competitiveness_score?: number | null;
+  lifestyle_score?: number | null;
+  compensation_score?: number | null;
+  organization?: string | null;
+  title?: string | null;
+  location?: string | null;
+  remote?: string | null;
+  salary?: string | null;
+  travel?: string | null;
+  link?: string | null;
+  recommendation?: string | null;
+  synopsis?: string | null;
+  pros?: string | null;
+  cons?: string | null;
+  duties?: string | null;
+  requirements?: string | null;
+  gaps?: string | null;
+  notes?: string | null;
+  resume_version?: string | null;
+  cover_letter?: string | null;
+  date_found?: string | null;
+};
+
+function fromDbOpportunity(row: any): Opportunity {
+  return hydrateOpportunity({
+    id: row.id,
+    firstSeen: row.first_seen || row.date_found || row.created_at?.slice?.(0,10) || today(),
+    lastReviewed: row.last_reviewed || row.updated_at?.slice?.(0,10) || today(),
+    tier: String(row.tier || "2") as Tier,
+    status: row.status || "Review",
+    rating: row.rating || "Unrated",
+    appliedDate: row.applied_date || "",
+    followUpDate: row.follow_up_date || "",
+    jimScore: row.jim_score || 0,
+    mission: row.mission_score || 0,
+    roleFit: row.role_fit_score || 0,
+    competitiveness: row.competitiveness_score || 0,
+    lifestyle: row.lifestyle_score || 0,
+    compensation: row.compensation_score || 0,
+    organization: row.organization || "",
+    position: row.title || "",
+    location: row.location || "",
+    remote: row.remote || "",
+    salary: row.salary || "",
+    travel: row.travel || "",
+    link: row.link || "",
+    recommendation: row.recommendation || "",
+    synopsis: row.synopsis || "",
+    pros: row.pros || "",
+    cons: row.cons || "",
+    duties: row.duties || "",
+    requirements: row.requirements || "",
+    gaps: row.gaps || "",
+    notes: row.notes || "",
+    resumeVersion: row.resume_version || "",
+    coverLetter: row.cover_letter || "",
+  });
+}
+
+function toDbOpportunity(o: Opportunity): DbOpportunity {
+  return {
+    id: o.id,
+    first_seen: o.firstSeen || today(),
+    last_reviewed: o.lastReviewed || today(),
+    date_found: o.firstSeen || today(),
+    tier: Number(o.tier || 2),
+    status: o.status,
+    rating: o.rating,
+    applied_date: o.appliedDate || null,
+    follow_up_date: o.followUpDate || null,
+    jim_score: Number(o.jimScore || 0),
+    mission_score: Number(o.mission || 0),
+    role_fit_score: Number(o.roleFit || 0),
+    competitiveness_score: Number(o.competitiveness || 0),
+    lifestyle_score: Number(o.lifestyle || 0),
+    compensation_score: Number(o.compensation || 0),
+    organization: o.organization,
+    title: o.position,
+    location: o.location,
+    remote: o.remote,
+    salary: o.salary,
+    travel: o.travel,
+    link: o.link,
+    recommendation: o.recommendation,
+    synopsis: o.synopsis,
+    pros: o.pros,
+    cons: o.cons,
+    duties: o.duties,
+    requirements: o.requirements,
+    gaps: o.gaps,
+    notes: o.notes,
+    resume_version: o.resumeVersion,
+    cover_letter: o.coverLetter,
+  };
+}
+
+function fromDbOrganization(row: any): Organization {
+  return { name: row.name, category: row.category || "", mission: row.mission || "", watchPriority: row.watch_priority || 0, notes: row.notes || "" };
+}
+
+function toDbOrganization(o: Organization) {
+  return { name: o.name, category: o.category, mission: o.mission, watch_priority: o.watchPriority, notes: o.notes };
+}
+
 function toCSV(rows: Opportunity[]) {
   const headers = ["firstSeen","lastReviewed","tier","status","rating","appliedDate","followUpDate","jimScore","mission","roleFit","competitiveness","lifestyle","compensation","organization","position","location","remote","salary","travel","link","recommendation","synopsis","pros","cons","duties","requirements","gaps","notes","resumeVersion","coverLetter"];
   const esc = (v: unknown) => `"${String(v ?? "").replaceAll('"', '""')}"`;
@@ -217,25 +333,47 @@ export default function Home() {
   const [editing, setEditing] = useState<Opportunity | null>(null);
   const [importing, setImporting] = useState(false);
   const [jsonText, setJsonText] = useState("");
+  const [loading, setLoading] = useState(true);
+  const [dbError, setDbError] = useState("");
 
   useEffect(() => {
-    const saved = localStorage.getItem(STORAGE_KEY);
-    if (saved) {
-      try {
-        const parsed = JSON.parse(saved);
-        setOpps(parsed.opps?.length ? parsed.opps.map(hydrateOpportunity) : seed.map(hydrateOpportunity));
-        setOrgs(parsed.orgs?.length ? parsed.orgs : seedOrgs);
-        setSelectedId((parsed.opps?.[0]?.id) || seed[0].id);
+    async function loadData() {
+      setLoading(true);
+      setDbError("");
+      const [{ data: opportunityRows, error: opportunityError }, { data: organizationRows, error: organizationError }] = await Promise.all([
+        supabase.from("opportunities").select("*").order("jim_score", { ascending: false }),
+        supabase.from("organizations").select("*").order("watch_priority", { ascending: false }),
+      ]);
+
+      if (opportunityError || organizationError) {
+        setDbError(opportunityError?.message || organizationError?.message || "Unable to load Supabase data.");
+        setLoading(false);
         return;
-      } catch {}
-    }
-    setOpps(seed.map(hydrateOpportunity));
-    setSelectedId(seed[0].id);
-  }, []);
+      }
 
-  useEffect(() => {
-    if (opps.length) localStorage.setItem(STORAGE_KEY, JSON.stringify({ opps, orgs }));
-  }, [opps, orgs]);
+      let loadedOpps = (opportunityRows || []).map(fromDbOpportunity);
+      let loadedOrgs = (organizationRows || []).map(fromDbOrganization);
+
+      if (!loadedOpps.length) {
+        const seedRows = seed.map(toDbOpportunity);
+        const { data, error } = await supabase.from("opportunities").upsert(seedRows).select("*");
+        if (error) setDbError(error.message);
+        loadedOpps = (data || []).map(fromDbOpportunity);
+      }
+
+      if (!loadedOrgs.length) {
+        const { data, error } = await supabase.from("organizations").upsert(seedOrgs.map(toDbOrganization), { onConflict: "name" }).select("*");
+        if (error) setDbError(error.message);
+        loadedOrgs = (data || []).map(fromDbOrganization);
+      }
+
+      setOpps(loadedOpps);
+      setOrgs(loadedOrgs.length ? loadedOrgs : seedOrgs);
+      setSelectedId(loadedOpps[0]?.id || "");
+      setLoading(false);
+    }
+    loadData();
+  }, []);
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -268,54 +406,74 @@ export default function Home() {
     };
   }, [opps]);
 
-  function saveOpportunity(o: Opportunity) {
+  async function saveOpportunity(o: Opportunity) {
+    const normalized = hydrateOpportunity({ ...o, lastReviewed: today() });
+    const { data, error } = await supabase.from("opportunities").upsert(toDbOpportunity(normalized)).select("*").single();
+    if (error) {
+      alert(`Save failed: ${error.message}`);
+      return;
+    }
+    const saved = fromDbOpportunity(data);
     setOpps(prev => {
-      const exists = prev.some(x => x.id === o.id);
-      if (exists) return prev.map(x => x.id === o.id ? o : x);
-      return [o, ...prev];
+      const exists = prev.some(x => x.id === saved.id);
+      if (exists) return prev.map(x => x.id === saved.id ? saved : x);
+      return [saved, ...prev];
     });
-    setSelectedId(o.id);
+    setSelectedId(saved.id);
     setEditing(null);
   }
 
-  
-  function quickUpdate(id: string, patch: Partial<Opportunity>) {
-    setOpps(prev => prev.map(o => o.id === id ? { ...o, ...patch, lastReviewed: today() } : o));
+  async function quickUpdate(id: string, patch: Partial<Opportunity>) {
+    const current = opps.find(o => o.id === id);
+    if (!current) return;
+    const updated = hydrateOpportunity({ ...current, ...patch, lastReviewed: today() });
+    setOpps(prev => prev.map(o => o.id === id ? updated : o));
+    const { error } = await supabase.from("opportunities").update(toDbOpportunity(updated)).eq("id", id);
+    if (error) {
+      alert(`Update failed: ${error.message}`);
+      const { data } = await supabase.from("opportunities").select("*").order("jim_score", { ascending: false });
+      setOpps((data || []).map(fromDbOpportunity));
+    }
   }
 
-  function deleteOpportunity(id: string) {
+  async function deleteOpportunity(id: string) {
     if (!confirm("Delete this opportunity?")) return;
+    const { error } = await supabase.from("opportunities").delete().eq("id", id);
+    if (error) {
+      alert(`Delete failed: ${error.message}`);
+      return;
+    }
     setOpps(prev => prev.filter(o => o.id !== id));
     setSelectedId("");
   }
 
-  function importJSON() {
+  async function importJSON() {
     try {
       const parsed = JSON.parse(jsonText);
-      if (parsed.orgs && Array.isArray(parsed.orgs)) setOrgs(parsed.orgs);
+      if (parsed.orgs && Array.isArray(parsed.orgs)) {
+        await supabase.from("organizations").upsert(parsed.orgs.map(toDbOrganization), { onConflict: "name" });
+        setOrgs(parsed.orgs);
+      }
       const incoming: Opportunity[] = Array.isArray(parsed) ? parsed : (parsed.opportunities || parsed.opps);
       if (!Array.isArray(incoming)) throw new Error("JSON must be an array, { opportunities: [...] }, or backup { opps: [...], orgs: [...] }");
       const mapped = incoming.map((x: any) => hydrateOpportunity({ ...x, lastReviewed: x.lastReviewed || today() }));
+      const byKey = new Map(opps.map(o => [normalizeKey(o), o]));
       let added = 0;
       let updated = 0;
-      setOpps(prev => {
-        const byKey = new Map(prev.map(o => [normalizeKey(o), o]));
-        const next = [...prev];
-        for (const item of mapped) {
-          const key = normalizeKey(item);
-          const existing = byKey.get(key);
-          if (existing) {
-            updated++;
-            const merged = { ...existing, ...item, id: existing.id, firstSeen: existing.firstSeen || item.firstSeen, lastReviewed: today() };
-            const idx = next.findIndex(o => o.id === existing.id);
-            next[idx] = merged;
-          } else {
-            added++;
-            next.unshift(item);
-          }
+      const rowsToUpsert = mapped.map(item => {
+        const existing = byKey.get(normalizeKey(item));
+        if (existing) {
+          updated++;
+          return toDbOpportunity({ ...existing, ...item, id: existing.id, firstSeen: existing.firstSeen || item.firstSeen, lastReviewed: today() });
         }
-        return next;
+        added++;
+        return toDbOpportunity(item);
       });
+      const { data, error } = await supabase.from("opportunities").upsert(rowsToUpsert).select("*");
+      if (error) throw error;
+      const refreshed = await supabase.from("opportunities").select("*").order("jim_score", { ascending: false });
+      if (refreshed.error) throw refreshed.error;
+      setOpps((refreshed.data || []).map(fromDbOpportunity));
       setImporting(false);
       setJsonText("");
       setTimeout(() => alert(`Import complete: ${added} added, ${updated} updated.`), 50);
@@ -374,6 +532,8 @@ export default function Home() {
       </div>
 
       <div className="wrap">
+        {loading && <div className="card"><strong>Loading Supabase data...</strong></div>}
+        {dbError && <div className="card" style={{borderColor:"#fca5a5", color:"#991b1b"}}><strong>Database error:</strong> {dbError}</div>}
         <div className="grid metrics">
           <div className="card metric"><div className="label">Total Jobs</div><div className="value">{metrics.total}</div></div>
           <div className="card metric"><div className="label">Active</div><div className="value">{metrics.active}</div></div>
